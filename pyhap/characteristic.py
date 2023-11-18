@@ -5,10 +5,11 @@ A Characteristic is the smallest unit of the smart home, e.g.
 a temperature measuring or a device status.
 """
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
+
 from uuid import UUID
 
-from .const import (
+
+from pyhap.const import (
     HAP_PERMISSION_READ,
     HAP_REPR_DESC,
     HAP_REPR_FORMAT,
@@ -19,13 +20,10 @@ from .const import (
     HAP_REPR_VALID_VALUES,
     HAP_REPR_VALUE,
 )
+
 from .util import hap_type_to_uuid, uuid_to_hap_type
 
-if TYPE_CHECKING:
-    from .accessory import Accessory
-    from .service import Service
-
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Plugin.HomeKit_pyHap")
 
 # ### HAP Format ###
 HAP_FORMAT_BOOL = "bool"
@@ -88,11 +86,14 @@ PROP_NUMERIC = {PROP_MAX_VALUE, PROP_MIN_VALUE, PROP_MIN_STEP, PROP_UNIT}
 
 CHAR_BUTTON_EVENT = UUID("00000126-0000-1000-8000-0026BB765291")
 CHAR_PROGRAMMABLE_SWITCH_EVENT = UUID("00000073-0000-1000-8000-0026BB765291")
-
+CHAR_LOCK_CURRENT_EVENT = UUID("0000001D-0000-1000-8000-0026BB765291")
+CHAR_LOCK_TARGET_EVENT = UUID("0000001E-0000-1000-8000-0026BB765291")
 
 IMMEDIATE_NOTIFY = {
     CHAR_BUTTON_EVENT,  # Button Event
     CHAR_PROGRAMMABLE_SWITCH_EVENT,  # Programmable Switch Event
+    CHAR_LOCK_TARGET_EVENT,
+    CHAR_LOCK_CURRENT_EVENT
 }
 
 # Special case, Programmable Switch Event always have a null value
@@ -105,7 +106,7 @@ class CharacteristicError(Exception):
     """Generic exception class for characteristic errors."""
 
 
-def _validate_properties(properties: Dict[str, Any]) -> None:
+def _validate_properties(properties):
     """Throw an exception on invalid properties."""
     if (
         HAP_REPR_MAX_LEN in properties
@@ -125,30 +126,22 @@ class Characteristic:
 
     __slots__ = (
         "broker",
-        "_display_name",
-        "_properties",
+        "display_name",
+        "properties",
         "type_id",
-        "_value",
+        "value",
         "getter_callback",
         "setter_callback",
         "service",
         "_uuid_str",
         "_loader_display_name",
         "allow_invalid_client_values",
-        "unique_id",
-        "_to_hap_cache_with_value",
-        "_to_hap_cache",
-        "_always_null",
+        "unique_id"
     )
 
     def __init__(
-        self,
-        display_name: Optional[str],
-        type_id: UUID,
-        properties: Dict[str, Any],
-        allow_invalid_client_values: bool = False,
-        unique_id: Optional[str] = None,
-    ) -> None:
+        self, display_name, type_id, properties, allow_invalid_client_values=False, unique_id=None
+    ):
         """Initialise with the given properties.
 
         :param display_name: Name that will be displayed for this
@@ -163,7 +156,7 @@ class Characteristic:
         :type properties: dict
         """
         _validate_properties(properties)
-        self.broker: Optional["Accessory"] = None
+        self.broker = None
         #
         # As of iOS 15.1, Siri requests TargetHeatingCoolingState
         # as Auto reguardless if its a valid value or not.
@@ -172,71 +165,37 @@ class Characteristic:
         # to True and handle converting the Auto state to Cool or Heat
         # depending on the device.
         #
-        self._always_null = type_id in ALWAYS_NULL
         self.allow_invalid_client_values = allow_invalid_client_values
-        self._display_name = display_name
-        self._properties: Dict[str, Any] = properties
+        self.display_name = display_name
+        self.properties = properties
         self.type_id = type_id
-        self._value = self._get_default_value()
-        self.getter_callback: Optional[Callable[[], Any]] = None
-        self.setter_callback: Optional[Callable[[Any], None]] = None
-        self.service: Optional["Service"] = None
+        self.value = self._get_default_value()
+        self.getter_callback = None
+        self.setter_callback = None
+        self.service = None
         self.unique_id = unique_id
         self._uuid_str = uuid_to_hap_type(type_id)
-        self._loader_display_name: Optional[str] = None
-        self._to_hap_cache_with_value: Optional[Dict[str, Any]] = None
-        self._to_hap_cache: Optional[Dict[str, Any]] = None
+        self._loader_display_name = None
 
-    @property
-    def display_name(self) -> Optional[str]:
-        """Return the display name of the characteristic."""
-        return self._display_name
-
-    @display_name.setter
-    def display_name(self, value: str) -> None:
-        """Set the display name of the characteristic."""
-        self._display_name = value
-        self._clear_cache()
-
-    @property
-    def value(self) -> Any:
-        """Return the value of the characteristic."""
-        return self._value
-
-    @value.setter
-    def value(self, value: Any) -> None:
-        """Set the value of the characteristic."""
-        self._value = value
-        self._clear_cache()
-
-    @property
-    def properties(self) -> Dict[str, Any]:
-        """Return the properties of the characteristic.
-
-        Properties should not be modified directly. Use override_properties instead.
-        """
-        return self._properties
-
-    def __repr__(self) -> str:
+    def __repr__(self):
         """Return the representation of the characteristic."""
         return (
-            f"<characteristic display_name={self._display_name} unique_id={self.unique_id} "
-            f"value={self._value} properties={self._properties}>"
+            f"<characteristic display_name={self.display_name} unique_id={self.unique_id} "
+            f"value={self.value} properties={self.properties}>"
         )
 
-    def _get_default_value(self) -> Any:
+    def _get_default_value(self):
         """Return default value for format."""
-        if self._always_null:
+        if self.type_id in ALWAYS_NULL:
             return None
 
-        valid_values = self._properties.get(PROP_VALID_VALUES)
-        if valid_values:
-            return min(valid_values.values())
+        if self.properties.get(PROP_VALID_VALUES):
+            return min(self.properties[PROP_VALID_VALUES].values())
 
-        value = HAP_FORMAT_DEFAULTS[self._properties[PROP_FORMAT]]
+        value = HAP_FORMAT_DEFAULTS[self.properties[PROP_FORMAT]]
         return self.to_valid_value(value)
 
-    def get_value(self) -> Any:
+    def get_value(self):
         """This is to allow for calling `getter_callback`
 
         :return: Current Characteristic Value
@@ -244,54 +203,49 @@ class Characteristic:
         if self.getter_callback:
             # pylint: disable=not-callable
             self.value = self.to_valid_value(value=self.getter_callback())
-        return self._value
+        return self.value
 
-    def valid_value_or_raise(self, value: Any) -> None:
+    def valid_value_or_raise(self, value):
         """Raise ValueError if PROP_VALID_VALUES is set and the value is not present."""
-        if self._always_null:
+        if self.type_id in ALWAYS_NULL:
             return
-        valid_values = self._properties.get(PROP_VALID_VALUES)
+        valid_values = self.properties.get(PROP_VALID_VALUES)
         if not valid_values:
             return
         if value in valid_values.values():
             return
-        error_msg = f"{self._display_name}: value={value} is an invalid value."
+        error_msg = f"{self.display_name}: value={value} is an invalid value."
         logger.error(error_msg)
         raise ValueError(error_msg)
 
-    def to_valid_value(self, value: Any) -> Any:
+    def to_valid_value(self, value):
         """Perform validation and conversion to valid value."""
-        properties = self._properties
-        prop_format = properties[PROP_FORMAT]
-
-        if prop_format == HAP_FORMAT_STRING:
-            return str(value)[: properties.get(HAP_REPR_MAX_LEN, DEFAULT_MAX_LENGTH)]
-
-        if prop_format == HAP_FORMAT_BOOL:
-            return bool(value)
-
-        if prop_format in HAP_FORMAT_NUMERICS:
+        if self.properties[PROP_FORMAT] == HAP_FORMAT_STRING:
+            value = str(value)[
+                : self.properties.get(HAP_REPR_MAX_LEN, DEFAULT_MAX_LENGTH)
+            ]
+        elif self.properties[PROP_FORMAT] == HAP_FORMAT_BOOL:
+            value = bool(value)
+        elif self.properties[PROP_FORMAT] in HAP_FORMAT_NUMERICS:
+            if value == None:
+                logger.debug("value error set to None - now 0")
+                value = 0
             if not isinstance(value, (int, float)):
                 error_msg = (
-                    f"{self._display_name}: value={value} is not a numeric value."
+                    f"{self.display_name}: value={value} is not a numeric value."
                 )
-                logger.error(error_msg)
+                logger.error(error_msg, exc_info=True)
                 raise ValueError(error_msg)
-            min_step = properties.get(PROP_MIN_STEP)
+            min_step = self.properties.get(PROP_MIN_STEP)
             if value and min_step:
                 value = round(min_step * round(value / min_step), 14)
-            value = min(properties.get(PROP_MAX_VALUE, value), value)
-            value = max(properties.get(PROP_MIN_VALUE, value), value)
-            if prop_format != HAP_FORMAT_FLOAT:
-                return int(value)
-
+            value = min(self.properties.get(PROP_MAX_VALUE, value), value)
+            value = max(self.properties.get(PROP_MIN_VALUE, value), value)
+            if self.properties[PROP_FORMAT] != HAP_FORMAT_FLOAT:
+                value = int(value)
         return value
 
-    def override_properties(
-        self,
-        properties: Optional[Dict[str, Any]] = None,
-        valid_values: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    def override_properties(self, properties=None, valid_values=None):
         """Override characteristic property values and valid values.
 
         :param properties: Dictionary with values to override the existing
@@ -305,31 +259,24 @@ class Characteristic:
         if not properties and not valid_values:
             raise ValueError("No properties or valid_values specified to override.")
 
-        self._clear_cache()
-
         if properties:
             _validate_properties(properties)
-            self._properties.update(properties)
+            self.properties.update(properties)
 
         if valid_values:
-            self._properties[PROP_VALID_VALUES] = valid_values
+            self.properties[PROP_VALID_VALUES] = valid_values
 
-        if self._always_null:
+        if self.type_id in ALWAYS_NULL:
             self.value = None
             return
 
         try:
-            self.value = self.to_valid_value(self._value)
-            self.valid_value_or_raise(self._value)
+            self.value = self.to_valid_value(self.value)
+            self.valid_value_or_raise(self.value)
         except ValueError:
             self.value = self._get_default_value()
 
-    def _clear_cache(self) -> None:
-        """Clear the cached HAP representation."""
-        self._to_hap_cache = None
-        self._to_hap_cache_with_value = None
-
-    def set_value(self, value: Any, should_notify: bool = True) -> None:
+    def set_value(self, value, should_notify=True):
         """Set the given raw value. It is checked if it is a valid value.
 
         If not set_value will be aborted and an error message will be
@@ -348,49 +295,47 @@ class Characteristic:
             subscribed clients. Notify will be performed if the broker is set.
         :type should_notify: bool
         """
-        logger.debug("set_value: %s to %s", self._display_name, value)
+        logger.debug("set_value: %s to %s", self.display_name, value)
         value = self.to_valid_value(value)
         self.valid_value_or_raise(value)
-        changed = self._value != value
+        changed = self.value != value
         self.value = value
         if changed and should_notify and self.broker:
             self.notify()
-        if self._always_null:
+        if self.type_id in ALWAYS_NULL:
             self.value = None
 
-    def client_update_value(
-        self, value: Any, sender_client_addr: Optional[Tuple[str, int]] = None
-    ) -> None:
+    def client_update_value(self, value, sender_client_addr=None):
         """Called from broker for value change in Home app.
 
         Change self.value to value and call callback.
         """
         original_value = value
-        if not self._always_null or original_value is not None:
+        if self.type_id not in ALWAYS_NULL or original_value is not None:
             value = self.to_valid_value(value)
         if not self.allow_invalid_client_values:
             self.valid_value_or_raise(value)
         logger.debug(
             "client_update_value: %s to %s (original: %s) from client: %s",
-            self._display_name,
+            self.display_name,
             value,
             original_value,
             sender_client_addr,
         )
-        previous_value = self._value
+        previous_value = self.value
         self.value = value
         response = None
         if self.setter_callback:
             # pylint: disable=not-callable
             response = self.setter_callback(value)
-        changed = self._value != previous_value
+        changed = self.value != previous_value
         if changed:
             self.notify(sender_client_addr)
-        if self._always_null:
+        if self.type_id in ALWAYS_NULL:
             self.value = None
         return response
 
-    def notify(self, sender_client_addr: Optional[Tuple[str, int]] = None) -> None:
+    def notify(self, sender_client_addr=None):
         """Notify clients about a value change. Sends the value.
 
         .. seealso:: accessory.publish
@@ -400,7 +345,7 @@ class Characteristic:
         self.broker.publish(self.value, self, sender_client_addr, immediate)
 
     # pylint: disable=invalid-name
-    def to_HAP(self, include_value: bool = True) -> Dict[str, Any]:
+    def to_HAP(self):
         """Create a HAP representation of this Characteristic.
 
         Used for json serialization.
@@ -408,57 +353,45 @@ class Characteristic:
         :return: A HAP representation.
         :rtype: dict
         """
-        if include_value:
-            if self._to_hap_cache_with_value is not None and not self.getter_callback:
-                return self._to_hap_cache_with_value
-        elif self._to_hap_cache is not None:
-            return self._to_hap_cache
-
-        properties = self._properties
-        permissions = properties[PROP_PERMISSIONS]
-        prop_format = properties[PROP_FORMAT]
         hap_rep = {
             HAP_REPR_IID: self.broker.iid_manager.get_iid(self),
             HAP_REPR_TYPE: self._uuid_str,
-            HAP_REPR_PERM: permissions,
-            HAP_REPR_FORMAT: prop_format,
+            HAP_REPR_PERM: self.properties[PROP_PERMISSIONS],
+            HAP_REPR_FORMAT: self.properties[PROP_FORMAT],
         }
         # HAP_REPR_DESC (description) is optional and takes up
         # quite a bit of space in the payload. Only include it
         # if it has been changed from the default loader version
-        loader_display_name = self._loader_display_name
-        display_name = self._display_name
-        if not loader_display_name or loader_display_name != display_name:
-            hap_rep[HAP_REPR_DESC] = display_name
+        if (
+            not self._loader_display_name
+            or self._loader_display_name != self.display_name
+        ):
+            hap_rep[HAP_REPR_DESC] = self.display_name
 
-        if prop_format in HAP_FORMAT_NUMERICS:
+        value = self.get_value()
+        if self.properties[PROP_FORMAT] in HAP_FORMAT_NUMERICS:
             hap_rep.update(
-                {k: properties[k] for k in PROP_NUMERIC.intersection(properties)}
+                {
+                    k: self.properties[k]
+                    for k in PROP_NUMERIC.intersection(self.properties)
+                }
             )
 
-            if PROP_VALID_VALUES in properties:
+            if PROP_VALID_VALUES in self.properties:
                 hap_rep[HAP_REPR_VALID_VALUES] = sorted(
-                    properties[PROP_VALID_VALUES].values()
+                    self.properties[PROP_VALID_VALUES].values()
                 )
-        elif prop_format == HAP_FORMAT_STRING:
-            max_length = properties.get(HAP_REPR_MAX_LEN, DEFAULT_MAX_LENGTH)
+        elif self.properties[PROP_FORMAT] == HAP_FORMAT_STRING:
+            max_length = self.properties.get(HAP_REPR_MAX_LEN, DEFAULT_MAX_LENGTH)
             if max_length != DEFAULT_MAX_LENGTH:
                 hap_rep[HAP_REPR_MAX_LEN] = max_length
+        if HAP_PERMISSION_READ in self.properties[PROP_PERMISSIONS]:
+            hap_rep[HAP_REPR_VALUE] = value
 
-        if include_value and HAP_PERMISSION_READ in permissions:
-            hap_rep[HAP_REPR_VALUE] = self.get_value()
-
-        if not include_value:
-            self._to_hap_cache = hap_rep
-        elif not self.getter_callback:
-            # Only cache if there is no getter_callback
-            self._to_hap_cache_with_value = hap_rep
         return hap_rep
 
     @classmethod
-    def from_dict(
-        cls, name: str, json_dict: Dict[str, Any], from_loader: bool = False
-    ) -> "Characteristic":
+    def from_dict(cls, name, json_dict, from_loader=False):
         """Initialize a characteristic object from a dict.
 
         :param json_dict: Dictionary containing at least the keys `Format`,

@@ -7,16 +7,15 @@ The idea is, give a name of a service and you get an
 instance of it (as long as it is described in some
 json file).
 """
+import json
 import logging
-
-import orjson
 
 from pyhap import CHARACTERISTICS_FILE, SERVICES_FILE
 from pyhap.characteristic import Characteristic
 from pyhap.service import Service
 
 _loader = None
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Plugin.HomeKit_pyHap")
 
 
 class Loader:
@@ -35,7 +34,7 @@ class Loader:
     def _read_file(path):
         """Read file and return a dict."""
         with open(path, "r", encoding="utf8") as file:
-            return orjson.loads(file.read())  # pylint: disable=no-member
+            return json.load(file)
 
     def get_char(self, name):
         """Return new Characteristic object."""

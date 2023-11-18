@@ -12,7 +12,6 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from .const import CLIENT_PROP_PERMS
 from .state import State
 
-
 class AccessoryEncoder:
     """This class defines the Accessory encoder interface.
 

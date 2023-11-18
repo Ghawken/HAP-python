@@ -18,9 +18,9 @@ streaming.
 
 import asyncio
 import functools
+import os
 import ipaddress
 import logging
-import os
 import struct
 from uuid import UUID
 
@@ -29,6 +29,8 @@ import async_timeout
 from pyhap import RESOURCE_DIR, tlv
 from pyhap.accessory import Accessory
 from pyhap.const import CATEGORY_CAMERA
+#from pyhap.util import to_base64_str, byte_bool
+#from pyhap import tlv
 from pyhap.util import byte_bool, to_base64_str
 
 SETUP_TYPES = {
@@ -212,7 +214,7 @@ NO_SRTP = b'\x01\x01\x02\x02\x00\x03\x00'
 
 
 FFMPEG_CMD = (
-    'ffmpeg -re -f avfoundation -framerate {fps} -i 0:0 -threads 0 '
+    './ffmpeg/ffmpeg -re -f avfoundation -framerate {fps} -threads 0 '
     '-vcodec libx264 -an -pix_fmt yuv420p -r {fps} -f rawvideo -tune zerolatency '
     '-vf scale={width}:{height} -b:v {v_max_bitrate}k -bufsize {v_max_bitrate}k '
     '-payload_type 99 -ssrc {v_ssrc} -f rtp '
@@ -222,10 +224,10 @@ FFMPEG_CMD = (
 )
 '''Template for the ffmpeg command.'''
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Plugin.HomeKit_pyHap")
 
 
-class Camera(Accessory):
+class Camera( Accessory):
     """An Accessory that can negotiated camera stream settings with iOS and start a
     stream.
     """
@@ -355,7 +357,7 @@ class Camera(Accessory):
                         configs + tlv.encode(SUPPORTED_COMFORT_NOISE_TAG, comfort_noise))
         return audio_config
 
-    def __init__(self, options, *args, **kwargs):
+    def __init__(self, options, config, *args, **kwargs):
         """Initialize a camera accessory with the given options.
 
         :param options: Describes the supported video and audio configuration
@@ -409,6 +411,10 @@ class Camera(Accessory):
 
         :type options: ``dict``
         """
+
+        self.options = options
+        self.config = config
+
         self.has_srtp = options.get('srtp', False)
         self.start_stream_cmd = options.get('start_stream_cmd', FFMPEG_CMD)
 
@@ -833,6 +839,8 @@ class Camera(Accessory):
             return False
 
         session_info['process'] = process
+        if self.plugin.debug7:
+            logger.info("Command:\n\n{}\n\n".format(cmd))
 
         logger.info(
             '[%s] Started stream process - PID %d',
@@ -842,7 +850,7 @@ class Camera(Accessory):
 
         return True
 
-    async def stop_stream(self, session_info):
+    async def stop_stream(self, session_info):  # pylint: disable=no-self-use
         """Stop the stream for the given ``session_id``.
 
         This method can be implemented if custom stop stream commands are needed. The
@@ -863,7 +871,7 @@ class Camera(Accessory):
                     _, stderr = await ffmpeg_process.communicate()
                 logger.debug('Stream command stderr: %s', stderr)
             except asyncio.TimeoutError:
-                logger.error(
+                logger.debug(
                     'Timeout while waiting for the stream process '
                     'to terminate. Trying with kill.'
                 )
@@ -886,7 +894,7 @@ class Camera(Accessory):
         """
         await self.start_stream(session_info, stream_config)
 
-    def get_snapshot(self, image_size):  # pylint: disable=unused-argument
+    def get_snapshot(self, image_size):  # pylint: disable=unused-argument, no-self-use
         """Return a jpeg of a snapshot from the camera.
 
         Overwrite to implement getting snapshots from your camera.

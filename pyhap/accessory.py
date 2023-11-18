@@ -1,36 +1,34 @@
 """Module for the Accessory classes."""
 import itertools
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
-from uuid import UUID
 
-from . import SUPPORT_QR_CODE, util
-from .const import (
+from uuid import UUID
+from pyhap import SUPPORT_QR_CODE, util
+from pyhap.const import (
     CATEGORY_BRIDGE,
     CATEGORY_OTHER,
-    HAP_PROTOCOL_VERSION,
     HAP_REPR_AID,
     HAP_REPR_IID,
+    HAP_PROTOCOL_VERSION,
     HAP_REPR_SERVICES,
     HAP_REPR_VALUE,
     STANDALONE_AID,
 )
-from .iid_manager import IIDManager
-from .service import Service
+from pyhap.iid_manager import IIDManager
+from pyhap.iid_manager import HomeIIDManager
+from pyhap.iid_manager import AccessoryIIDStorage
 
-if SUPPORT_QR_CODE:
-    import base36
-    from pyqrcode import QRCode
+from pyhap.service import Service
 
 
-if TYPE_CHECKING:
-    from .accessory_driver import AccessoryDriver
-    from .characteristic import Characteristic
+import base36
+from pyqrcode import QRCode
+import webbrowser
 
 
 HAP_PROTOCOL_INFORMATION_SERVICE_UUID = UUID("000000A2-0000-1000-8000-0026BB765291")
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Plugin.HomeKit_pyHap")
 
 
 class Accessory:
@@ -41,13 +39,7 @@ class Accessory:
 
     category = CATEGORY_OTHER
 
-    def __init__(
-        self,
-        driver: "AccessoryDriver",
-        display_name: Optional[str],
-        aid: Optional[int] = None,
-        iid_manager: Optional[IIDManager] = None,
-    ) -> None:
+    def __init__( self, driver, display_name, aid=None, iid_manager=None ):
         """Initialise with the given properties.
 
         :param display_name: Name to be displayed in the Home app.
@@ -59,24 +51,25 @@ class Accessory:
             will assign the standalone AID to this `Accessory`.
         :type aid: int
         """
-        self.aid: Optional[int] = aid
-        self.display_name: Optional[str] = display_name
+
+        self.aid = aid
+        self.display_name = display_name
         self.driver = driver
-        self.services: List[Service] = []
+        self.services = []
         self.iid_manager = iid_manager or IIDManager()
-        self.setter_callback: Optional[Callable[[Any], None]] = None
+        self.setter_callback = None
 
         self.add_info_service()
         if aid == STANDALONE_AID:
             self.add_protocol_version_service()
 
-    def __repr__(self) -> str:
+    def __repr__(self):
         """Return the representation of the accessory."""
         services = [s.display_name for s in self.services]
         return f"<accessory display_name='{self.display_name}' services={services}>"
 
     @property
-    def available(self) -> bool:
+    def available(self):
         """Accessory is available.
 
         If available is False, get_characteristics will return
@@ -87,7 +80,7 @@ class Accessory:
         """
         return True
 
-    def add_info_service(self) -> None:
+    def add_info_service(self):
         """Helper method to add the required `AccessoryInformation` service.
 
         Called in `__init__` to be sure that it is the first service added.
@@ -128,12 +121,7 @@ class Accessory:
                     self.display_name,
                 )
 
-    def add_preload_service(
-        self,
-        service: Service,
-        chars: Optional[Iterable["Characteristic"]] = None,
-        unique_id: Optional[str] = None,
-    ) -> Service:
+    def add_preload_service(self, service, chars=None, unique_id=None):
         """Create a service with the given name and add it to this acc."""
         service = self.driver.loader.get_service(service)
         if unique_id is not None:
@@ -146,12 +134,12 @@ class Accessory:
         self.add_service(service)
         return service
 
-    def set_primary_service(self, primary_service: Service) -> None:
+    def set_primary_service(self, primary_service):
         """Set the primary service of the acc."""
         for service in self.services:
             service.is_primary_service = service.type_id == primary_service.type_id
 
-    def add_service(self, *servs: Service) -> None:
+    def add_service(self, *servs):
         """Add the given services to this Accessory.
 
         This also assigns unique IIDS to the services and their Characteristics.
@@ -170,7 +158,8 @@ class Accessory:
                 c.broker = self
                 self.iid_manager.assign(c)
 
-    def get_service(self, name: str) -> Optional[Service]:
+
+    def get_service(self, name):
         """Return a Service with the given name.
 
         A single Service is returned even if more than one Service with the same name
@@ -185,7 +174,7 @@ class Accessory:
         """
         return next((s for s in self.services if s.display_name == name), None)
 
-    def xhm_uri(self) -> str:
+    def xhm_uri(self):
         """Generates the X-HM:// uri (Setup Code URI)
 
         :rtype: str
@@ -212,7 +201,7 @@ class Accessory:
 
         return "X-HM://" + encoded_payload + self.driver.state.setup_id
 
-    def get_characteristic(self, aid: int, iid: int) -> Optional["Characteristic"]:
+    def get_characteristic(self, aid, iid):
         """Get the characteristic for the given IID.
 
         The AID is used to verify if the search is in the correct accessory.
@@ -222,7 +211,7 @@ class Accessory:
 
         return self.iid_manager.get_obj(iid)
 
-    def to_HAP(self, include_value: bool = True) -> Dict[str, Any]:
+    def to_HAP(self):
         """A HAP representation of this Accessory.
 
         :return: A HAP representation of this accessory. For example:
@@ -241,9 +230,7 @@ class Accessory:
         """
         return {
             HAP_REPR_AID: self.aid,
-            HAP_REPR_SERVICES: [
-                s.to_HAP(include_value=include_value) for s in self.services
-            ],
+            HAP_REPR_SERVICES: [s.to_HAP() for s in self.services],
         }
 
     def setup_message(self):
@@ -253,26 +240,42 @@ class Accessory:
         Installation through `pip install HAP-python[QRCode]`
         """
         pincode = self.driver.state.pincode.decode()
+       # logger.info('Enter this code in your HomeKit app on your iOS device: {}'
+     #   .format(pincode))
+
+        SUPPORT_QR_CODE = True
+
         if SUPPORT_QR_CODE:
             xhm_uri = self.xhm_uri()
-            print(f"Setup payload: {xhm_uri}", flush=True)
-            print(
-                "Scan this code with your HomeKit app on your iOS device:", flush=True
-            )
-            print(QRCode(xhm_uri).terminal(quiet_zone=2), flush=True)
-            print(
-                f"Or enter this code in your HomeKit app on your iOS device: {pincode}",
-                flush=True,
-            )
+
+           # logger.info(f"Setup payload: {xhm_uri}")
+            logger.info(
+                "Scan the QR code with your HomeKit app on your iOS device:"           )
+            logger.info("Select Device QR button to Display QR Code, or use pincode.")
+      #      logger.info(QRCode(xhm_uri).terminal(quiet_zone=2))
+          #  textcode = QRCode(xhm_uri).text(quiet_zone=8)
+            image_as_str = QRCode(xhm_uri).png_as_base64_str(scale=5)
+            html_img = '''<div><h1>HomeKitLink Siri</h1>
+  <p>  Indigo Plugin: Scan this QR Code to add HomeKitLink Siri Bridge to HomeKit</p>
+  <img src="data:image/png;base64,{}" width="600" height="600">'''.format(image_as_str)
+            html_img = html_img + "</div>"
+            #builtins.QRCodeurl = html_img
+        #    logger.info(html_img)
+          #  webbrowser.get().open_new(html_img)
+         #   logger.info("\n\n"+textcode+"\n\n")
+
+            logger.debug(
+                f"Or enter this code in your HomeKit app on your iOS device: {pincode}"          )
+            return (html_img, pincode)
+
         else:
-            print(
-                "To use the QR Code feature, use 'pip install HAP-python[QRCode]'",
-                flush=True,
-            )
-            print(
-                f"Enter this code in your HomeKit app on your iOS device: {pincode}",
-                flush=True,
-            )
+
+
+            logger.info(
+                "To use the QR Code feature, use 'pip install " "HAP-python[QRCode]'")
+            logger.info(
+                f"Enter this code in your HomeKit app on your iOS device: {pincode}"            )
+            return (None,pincode)
 
     @staticmethod
     def run_at_interval(seconds):
@@ -344,18 +347,14 @@ class Bridge(Accessory):
 
     category = CATEGORY_BRIDGE
 
-    def __init__(
-        self,
-        driver: "AccessoryDriver",
-        display_name: Optional[str],
-        iid_manager: Optional[IIDManager] = None,
-    ) -> None:
+    def __init__(self, driver, display_name, iid_manager=None):
         super().__init__(
             driver, display_name, aid=STANDALONE_AID, iid_manager=iid_manager
         )
         self.accessories = {}  # aid: acc
 
-    def add_accessory(self, acc: "Accessory") -> None:
+
+    def add_accessory(self, acc):
         """Add the given ``Accessory`` to this ``Bridge``.
 
         Every ``Accessory`` in a ``Bridge`` must have an AID and this AID must be
@@ -384,21 +383,18 @@ class Bridge(Accessory):
                 if aid != 7 and aid not in self.accessories
             )
         elif acc.aid == self.aid or acc.aid in self.accessories:
-            raise ValueError("Duplicate AID found when attempting to add accessory")
+            raise ValueError("Duplicate AID ({}) found when attempting to add this accessory: {}".format(acc.aid, acc))
 
         self.accessories[acc.aid] = acc
 
-    def to_HAP(self, include_value: bool = True) -> List[Dict[str, Any]]:
+    def to_HAP(self):
         """Returns a HAP representation of itself and all contained accessories.
 
         .. seealso:: Accessory.to_HAP
         """
-        return [
-            acc.to_HAP(include_value=include_value)
-            for acc in (super(), *self.accessories.values())
-        ]
+        return [acc.to_HAP() for acc in (super(), *self.accessories.values())]
 
-    def get_characteristic(self, aid: int, iid: int) -> Optional["Characteristic"]:
+    def get_characteristic(self, aid, iid):
         """.. seealso:: Accessory.to_HAP"""
         if self.aid == aid:
             return self.iid_manager.get_obj(iid)
@@ -409,17 +405,17 @@ class Bridge(Accessory):
 
         return acc.get_characteristic(aid, iid)
 
-    async def run(self) -> None:
+    async def run(self):
         """Schedule tasks for each of the accessories' run method."""
         for acc in self.accessories.values():
             self.driver.async_add_job(acc.run)
 
-    async def stop(self) -> None:
+    async def stop(self):
         """Calls stop() on all contained accessories."""
         await self.driver.async_add_job(super().stop)
         for acc in self.accessories.values():
             await self.driver.async_add_job(acc.stop)
 
 
-def get_topic(aid: int, iid: int) -> str:
+def get_topic(aid, iid):
     return str(aid) + "." + str(iid)
