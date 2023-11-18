@@ -1,9 +1,8 @@
 """Encodes and decodes Tag-Length-Value (tlv8) data."""
 import struct
-from typing import Any, Dict
 
 from pyhap import util
-
+from typing import Any, Dict
 
 def encode(*args, to_base64=False):
     """Encode the given byte args in TLV format.

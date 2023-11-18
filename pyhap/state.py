@@ -1,6 +1,7 @@
 """Module for `State` class."""
-from typing import Dict, List, Optional, Union
+from typing import Dict
 from uuid import UUID
+from typing import List, Optional, Union
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
 

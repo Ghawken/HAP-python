@@ -17,24 +17,25 @@ the Characteristic does not block waiting for the actual send to happen.
 """
 import asyncio
 import base64
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import logging
 import os
 import re
+import socket
 import sys
 import tempfile
-import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+import threading
 
 from zeroconf import ServiceInfo
 from zeroconf.asyncio import AsyncZeroconf
+#from zeroconf import InterfaceChoice, IPVersion, ServiceStateChange
+from typing import Optional
 
 from pyhap import util
 from pyhap.accessory import Accessory, get_topic
-from pyhap.characteristic import Characteristic, CharacteristicError
+from pyhap.characteristic import CharacteristicError
 from pyhap.const import (
     HAP_PERMISSION_NOTIFY,
     HAP_PROTOCOL_SHORT_VERSION,
@@ -42,9 +43,9 @@ from pyhap.const import (
     HAP_REPR_AID,
     HAP_REPR_CHARS,
     HAP_REPR_IID,
+    HAP_REPR_TTL,
     HAP_REPR_PID,
     HAP_REPR_STATUS,
-    HAP_REPR_TTL,
     HAP_REPR_VALUE,
     HAP_REPR_WRITE_RESPONSE,
     STANDALONE_AID,
@@ -54,13 +55,13 @@ from pyhap.hap_server import HAPServer
 from pyhap.hsrp import Server as SrpServer
 from pyhap.loader import Loader
 from pyhap.params import get_srp_context
-from pyhap.service import Service
 from pyhap.state import State
 
 from .const import HAP_SERVER_STATUS
 from .util import callback
 
-logger = logging.getLogger(__name__)
+#logger = logging.getLogger(__name__)
+logger = logging.getLogger("Plugin.HomeKit_pyHap")
 
 SERVICE_CALLBACK = "callback"
 SERVICE_CHARS = "chars"
@@ -69,13 +70,12 @@ HAP_SERVICE_TYPE = "_hap._tcp.local."
 VALID_MDNS_REGEX = re.compile(r"[^A-Za-z0-9\-]+")
 LEADING_TRAILING_SPACE_DASH = re.compile(r"^[ -]+|[ -]+$")
 DASH_REGEX = re.compile(r"[-]+")
-KEYS_TO_EXCLUDE = {HAP_REPR_IID, HAP_REPR_AID}
 
 
 def _wrap_char_setter(char, value, client_addr):
     """Process an characteristic setter callback trapping and logging all exceptions."""
     try:
-        response = char.client_update_value(value, client_addr)
+        result = char.client_update_value(value, client_addr)
     except Exception:  # pylint: disable=broad-except
         logger.exception(
             "%s: Error while setting characteristic %s to %s",
@@ -84,7 +84,7 @@ def _wrap_char_setter(char, value, client_addr):
             value,
         )
         return HAP_SERVER_STATUS.SERVICE_COMMUNICATION_FAILURE, None
-    return HAP_SERVER_STATUS.SUCCESS, response
+    return HAP_SERVER_STATUS.SUCCESS, result
 
 
 def _wrap_acc_setter(acc, updates_by_service, client_addr):
@@ -126,8 +126,7 @@ class AccessoryMDNSServiceInfo(ServiceInfo):
 
     def __init__(self, accessory, state, zeroconf_server=None):
         self.accessory = accessory
-        self.state: State = state
-
+        self.state = state
         adv_data = self._get_advert_data()
         valid_name = self._valid_name()
         short_mac = self.state.mac[-8:].replace(":", "")
@@ -265,29 +264,32 @@ class AccessoryDriver:
         :type zeroconf_server: str
         """
         if loop is None:
-            if sys.platform == "win32":
-                loop = asyncio.ProactorEventLoop()
-            else:
-                loop = asyncio.new_event_loop()
-
+            loop = asyncio.new_event_loop()
+            logger.debug("Asyncio created a new Event Loop")
             executor_opts = {"max_workers": None}
             if sys.version_info >= (3, 6):
                 executor_opts["thread_name_prefix"] = "SyncWorker"
-
             self.executor = ThreadPoolExecutor(**executor_opts)
             loop.set_default_executor(self.executor)
             self.tid = threading.current_thread()
         else:
+            logger.debug("Asyncio using Main Thread")
             self.tid = threading.main_thread()
             self.executor = None
 
+        logger.debug(f"\n\nInit mDNS: Using interface choices for Zeroconf of {interface_choice=}\n" +
+        f"Init mDNS: Using HAP addresses of {address=}\n" +
+        f"Init mDNS: Using Listen addresses of {listen_address=}\n" +
+        f"Init mDNS: Using Advertised addresses of {advertised_address=}\n" +
+        f"Init mDNS: Using AsyncZeroConf {async_zeroconf_instance}\n" +
+        f"Init mDNS: Using ZeroConf {zeroconf_server=}\n")
         self.loop = loop
-
+       # self.indigodeviceid = indigodeviceid
         self.accessory: Optional[Accessory] = None
         self.advertiser = async_zeroconf_instance
         self.zeroconf_server = zeroconf_server
         self.interface_choice = interface_choice
-
+        self.advertised_address = advertised_address
         self.persist_file = os.path.expanduser(persist_file)
         self.encoder = encoder or AccessoryEncoder()
         self.topics = {}  # topic: set of (address, port) of subscribed clients
@@ -307,9 +309,17 @@ class AccessoryDriver:
         )
 
         listen_address = listen_address or address
+        logger.debug(f"\nmDNS: Using interface choices for Zeroconf of {self.interface_choice=}\n" +
+        f"mDNS: Using HAP addresses of {address=}\n" +
+        f"mDNS: Using Listen addresses of {listen_address=}\n" +
+        f"mDNS: Using Advertised addresses of {advertised_address=}\n" +
+        f"mDNS: Using AsyncZeroConf {self.advertiser=}\n" +
+        f"mDNS: Using ZeroConf {self.zeroconf_server=}\n")
+
         network_tuple = (listen_address, self.state.port)
         self.http_server = HAPServer(network_tuple, self)
         self.prepared_writes = {}
+
 
     def start(self):
         """Start the event loop and call `start_service`.
@@ -317,7 +327,9 @@ class AccessoryDriver:
         Pyhap will be stopped gracefully on a KeyBoardInterrupt.
         """
         try:
-            logger.info("Starting the event loop")
+
+            logger.debug("Starting the event loop")
+            #self.loop = asyncio.new_event_loop()
             if (
                 threading.current_thread() is threading.main_thread()
                 and os.name != "nt"
@@ -331,15 +343,21 @@ class AccessoryDriver:
                     "Not setting a child watcher. Set one if "
                     "subprocesses will be started outside the main thread."
                 )
+
             self.add_job(self.async_start())
             self.loop.run_forever()
-        except KeyboardInterrupt:
-            logger.debug("Got a KeyboardInterrupt, stopping driver")
+
+        except self.plugin.StopThread:
+            logger.info("Got a End Indigo Thread Alert, stopping driver")
+            self.loop.call_soon_threadsafe(self.loop.create_task, self.async_stop())
+            self.loop.run_forever()
+        except:
+            logger.exception("Indigo inducing a exception here.  which one?")
             self.loop.call_soon_threadsafe(self.loop.create_task, self.async_stop())
             self.loop.run_forever()
         finally:
             self.loop.close()
-            logger.info("Closed the event loop")
+            logger.info("Closed the flux capacitor loop.")
 
     def start_service(self):
         """Start the service."""
@@ -370,7 +388,7 @@ class AccessoryDriver:
         self.aio_stop_event = asyncio.Event()
 
         logger.info(
-            "Starting accessory %s on addresses %s, port %s.",
+            "Starting accessory %s with advertised addresses %s with port %s.",
             self.accessory.display_name,
             self.state.addresses,
             self.state.port,
@@ -388,7 +406,7 @@ class AccessoryDriver:
             self.async_persist()
 
         # Advertise the accessory as a mDNS service.
-        logger.debug("Starting mDNS.")
+        logger.debug(f"Starting mDNS. {self.accessory=}  {self.state=}  {self.zeroconf_server=}")
         self.mdns_service_info = AccessoryMDNSServiceInfo(
             self.accessory, self.state, self.zeroconf_server
         )
@@ -396,8 +414,17 @@ class AccessoryDriver:
         if not self.advertiser:
             zc_args = {}
             if self.interface_choice is not None:
-                zc_args["interfaces"] = self.interface_choice
-            self.advertiser = AsyncZeroconf(**zc_args)
+                zc_args["ip_version"] = self.interface_choice
+            if self.advertised_address is not None:
+                if isinstance(self.advertised_address, str):
+                    zc_args["interfaces"] = self.advertised_address
+                else:
+                    zc_args["interfaces"] = [self.advertised_address]
+            self.advertiser = AsyncZeroconf(**zc_args)  ## create new zeroconf async - with arguments.
+            logger.debug(f"mDNS Creating own instance of AsyncZeroconf with standard arguments.  {zc_args=}")
+        else:
+            logger.debug(f"mDNS using joint async ZeroConf Server {self.advertiser=}")
+
         await self.advertiser.async_register_service(
             self.mdns_service_info, cooperating_responders=True
         )
@@ -426,11 +453,10 @@ class AccessoryDriver:
         await self.advertiser.async_close()
 
         self.aio_stop_event.set()
-
         self.http_server.async_stop()
 
         logger.info(
-            "Stopping accessory %s on address %s, port %s.",
+            "Stopping accessory %s on addresses %s, port %s.",
             self.accessory.display_name,
             self.state.addresses,
             self.state.port,
@@ -480,10 +506,10 @@ class AccessoryDriver:
         elif accessory.aid != STANDALONE_AID:
             raise ValueError("Top-level accessory must have the AID == 1.")
         if os.path.exists(self.persist_file):
-            logger.info("Loading Accessory state from `%s`", self.persist_file)
+            logger.debug("Loading Accessory state from `%s`", self.persist_file)
             self.load()
         else:
-            logger.info("Storing Accessory state in `%s`", self.persist_file)
+            logger.debug("Storing Accessory state in `%s`", self.persist_file)
             self.persist()
 
     @util.callback
@@ -635,7 +661,6 @@ class AccessoryDriver:
 
     def persist(self):
         """Saves the state of the accessory.
-
         Must run in executor.
         """
         logger.debug("Writing of accessory state to disk")
@@ -647,11 +672,6 @@ class AccessoryDriver:
             ) as file_handle:
                 tmp_filename = file_handle.name
                 self.encoder.persist(file_handle, self.state)
-            if (
-                os.name == "nt"
-            ):  # Or `[WinError 5] Access Denied` will be raised on Windows
-                os.chmod(tmp_filename, 0o644)
-                os.chmod(self.persist_file, 0o644)
             os.replace(tmp_filename, self.persist_file)
         except Exception:  # pylint: disable=broad-except
             logger.exception("Failed to persist accessory state")
@@ -745,18 +765,11 @@ class AccessoryDriver:
     @property
     def accessories_hash(self):
         """Hash the get_accessories response to track configuration changes."""
-        # We pass include_value=False to avoid including the value
-        # of the characteristics in the hash. This is because the
-        # value of the characteristics is not used by iOS to determine
-        # if the accessory configuration has changed. It only uses the
-        # characteristics metadata. If we included the value in the hash
-        # then iOS would think the accessory configuration has changed
-        # every time a characteristic value changed.
         return hashlib.sha512(
-            util.to_sorted_hap_json(self.get_accessories(include_value=False))
+            util.to_sorted_hap_json(self.get_accessories())
         ).hexdigest()
 
-    def get_accessories(self, include_value: bool = True):
+    def get_accessories(self):
         """Returns the accessory in HAP format.
 
         :return: An example HAP representation is:
@@ -781,7 +794,7 @@ class AccessoryDriver:
 
         :rtype: dict
         """
-        hap_rep = self.accessory.to_HAP(include_value=include_value)
+        hap_rep = self.accessory.to_HAP()
         if not isinstance(hap_rep, list):
             hap_rep = [
                 hap_rep,
@@ -832,6 +845,8 @@ class AccessoryDriver:
                 if available:
                     rep[HAP_REPR_VALUE] = char.get_value()
                     rep[HAP_REPR_STATUS] = HAP_SERVER_STATUS.SUCCESS
+
+
             except CharacteristicError:
                 logger.error(
                     "%s: Error getting value for characteristic %s.",
@@ -862,105 +877,124 @@ class AccessoryDriver:
                  "iid": 2,
                  "value": False, # Value to set
                  "ev": True # (Un)subscribe for events from this characteristics.
-                 "r": True # Request write response
+                  "r": True # Request write response
               }]
            }
 
         :type chars_query: dict
         """
         # TODO: Add support for chars that do no support notifications.
-
-        queries: List[Dict[str, Any]] = chars_query[HAP_REPR_CHARS]
-
-        self._notify(queries, client_addr)
-
-        updates_by_accessories_services: Dict[
-            Accessory, Dict[Service, Dict[Characteristic, Any]]
-        ] = defaultdict(lambda: defaultdict(dict))
-        results: Dict[int, Dict[int, Dict[str, Any]]] = defaultdict(
-            lambda: defaultdict(dict)
-        )
-        char_to_iid: Dict[Characteristic, int] = {}
-
+        updates = {}
+        setter_results = {}
+        setter_responses = {}
+        had_error = False
+        had_write_response = False
         expired = False
+
         if HAP_REPR_PID in chars_query:
             pid = chars_query[HAP_REPR_PID]
             expire_time = self.prepared_writes.get(client_addr, {}).pop(pid, None)
-            expired = expire_time is None or time.time() > expire_time
+            if expire_time is None or time.time() > expire_time:
+                expired = True
 
-        primary_accessory = self.accessory
-        primary_aid = primary_accessory.aid
+        for cq in chars_query[HAP_REPR_CHARS]:
+            aid, iid = cq[HAP_REPR_AID], cq[HAP_REPR_IID]
+            setter_results.setdefault(aid, {})
 
-        for query in queries:
-            if HAP_REPR_VALUE not in query and not expired:
+            if HAP_REPR_WRITE_RESPONSE in cq:
+                setter_responses.setdefault(aid, {})
+                had_write_response = True
+
+            if expired:
+                setter_results[aid][iid] = HAP_SERVER_STATUS.INVALID_VALUE_IN_REQUEST
+                had_error = True
                 continue
 
-            aid = query[HAP_REPR_AID]
-            iid = query[HAP_REPR_IID]
-            value = query.get(HAP_REPR_VALUE)
-            write_response_requested = query.get(HAP_REPR_WRITE_RESPONSE, False)
-
-            if aid == primary_aid:
-                acc = primary_accessory
-            else:
-                acc = self.accessory.accessories.get(aid)
-            char = acc.get_characteristic(aid, iid)
-
-            set_result = HAP_SERVER_STATUS.INVALID_VALUE_IN_REQUEST
-            set_result_value = None
-
-            if value is not None:
-                set_result, set_result_value = _wrap_char_setter(
-                    char, value, client_addr
+            if HAP_PERMISSION_NOTIFY in cq:
+                char_topic = get_topic(aid, iid)
+                action = "Subscribed" if cq[HAP_PERMISSION_NOTIFY] else "Unsubscribed"
+                logger.debug(
+                    "%s client %s to topic %s", action, client_addr, char_topic
+                )
+                self.async_subscribe_client_topic(
+                    client_addr, char_topic, cq[HAP_PERMISSION_NOTIFY]
                 )
 
-            if set_result_value is not None and write_response_requested:
-                result = {HAP_REPR_STATUS: set_result, HAP_REPR_VALUE: set_result_value}
+            if HAP_REPR_VALUE not in cq:
+                continue
+
+            updates.setdefault(aid, {})[iid] = cq[HAP_REPR_VALUE]
+
+        for aid, new_iid_values in updates.items():
+            if self.accessory.aid == aid:
+                acc = self.accessory
             else:
-                result = {HAP_REPR_STATUS: set_result}
+                acc = self.accessory.accessories.get(aid)
 
-            results[aid][iid] = result
-            char_to_iid[char] = iid
-            service = char.service
-            updates_by_accessories_services[acc][service][char] = value
+            updates_by_service = {}
+            char_to_iid = {}
+            for iid, value in new_iid_values.items():
+                # Characteristic level setter callbacks
+                char = acc.get_characteristic(aid, iid)
 
-        # Proccess accessory and service level setter callbacks
-        for acc, updates_by_service in updates_by_accessories_services.items():
-            aid = acc.aid
-            aid_results = results[aid]
+                set_result, set_result_value = _wrap_char_setter(char, value, client_addr)
+                if set_result != HAP_SERVER_STATUS.SUCCESS:
+                    had_error = True
+                setter_results[aid][iid] = set_result
+
+                if set_result_value is not None:
+                    if setter_responses.get(aid, None) is None:
+                        logger.warning(
+                            "Returning write response '%s' when it wasn't requested for %s %s",
+                            set_result_value, aid, iid
+                        )
+                    had_write_response = True
+                    setter_responses.setdefault(aid, {})[iid] = set_result_value
+
+                if not char.service or (
+                    not acc.setter_callback and not char.service.setter_callback
+                ):
+                    continue
+                char_to_iid[char] = iid
+                updates_by_service.setdefault(char.service, {}).update({char: value})
 
             # Accessory level setter callbacks
-            acc_set_result = None
             if acc.setter_callback:
-                acc_set_result = _wrap_acc_setter(acc, updates_by_service, client_addr)
+                set_result = _wrap_acc_setter(acc, updates_by_service, client_addr)
+                if set_result != HAP_SERVER_STATUS.SUCCESS:
+                    had_error = True
+                for iid in updates[aid]:
+                    setter_results[aid][iid] = set_result
 
             # Service level setter callbacks
             for service, chars in updates_by_service.items():
-                char_set_result = None
-                if service.setter_callback:
-                    char_set_result = _wrap_service_setter(service, chars, client_addr)
-                set_result = char_set_result or acc_set_result
-
-                if not set_result:
+                if not service.setter_callback:
                     continue
-
+                set_result = _wrap_service_setter(service, chars, client_addr)
+                if set_result != HAP_SERVER_STATUS.SUCCESS:
+                    had_error = True
                 for char in chars:
-                    aid_results[char_to_iid[char]][HAP_REPR_STATUS] = set_result
+                    setter_results[aid][char_to_iid[char]] = set_result
 
-        characteristics = []
-        nonempty_results_exist = False
-        for aid, iid_results in results.items():
-            for iid, result in iid_results.items():
-                result[HAP_REPR_AID] = aid
-                result[HAP_REPR_IID] = iid
-                characteristics.append(result)
-                if (
-                    result[HAP_REPR_STATUS] != HAP_SERVER_STATUS.SUCCESS
-                    or HAP_REPR_VALUE in result
-                ):
-                    nonempty_results_exist = True
+        if not had_error and not had_write_response:
+            return None
 
-        return {HAP_REPR_CHARS: characteristics} if nonempty_results_exist else None
+        return {
+            HAP_REPR_CHARS: [
+                {
+                    HAP_REPR_AID: aid,
+                    HAP_REPR_IID: iid,
+                    HAP_REPR_STATUS: status,
+                    **(
+                        {HAP_REPR_VALUE: setter_responses[aid][iid]}
+                        if setter_responses.get(aid, {}).get(iid, None) is not None
+                        else {}
+                    )
+                }
+                for aid, iid_status in setter_results.items()
+                for iid, status in iid_status.items()
+            ]
+        }
 
     def prepare(self, prepare_query, client_addr):
         """Called from ``HAPServerHandler`` when iOS wants to prepare a write.
@@ -999,23 +1033,8 @@ class AccessoryDriver:
         and everything else that needs stopping and will exit gracefully.
         """
         try:
+            logger.error("Here it is.  Signal Handler")
             self.stop()
         except Exception as e:
             logger.error("Could not stop AccessoryDriver because of error: %s", e)
             raise
-
-    def _notify(
-        self, queries: List[Dict[str, Any]], client_addr: Tuple[str, int]
-    ) -> None:
-        """Notify the driver that the client has subscribed or unsubscribed."""
-        for query in queries:
-            if HAP_PERMISSION_NOTIFY not in query:
-                continue
-            aid = query[HAP_REPR_AID]
-            iid = query[HAP_REPR_IID]
-            ev = query[HAP_PERMISSION_NOTIFY]
-
-            char_topic = get_topic(aid, iid)
-            action = "Subscribed" if ev else "Unsubscribed"
-            logger.debug("%s client %s to topic %s", action, client_addr, char_topic)
-            self.async_subscribe_client_topic(client_addr, char_topic, ev)

@@ -1,20 +1,20 @@
 import asyncio
 import base64
 import functools
+import ujson
 import random
 import socket
-from typing import Awaitable, Set
 from uuid import UUID
-
 import async_timeout
-import orjson
-
 from .const import BASE_UUID
+from typing import Awaitable, Set
+
+import logging
+logger = logging.getLogger("Plugin.HomeKit_pyHap")
 
 ALPHANUM = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 HEX_DIGITS = "0123456789ABCDEF"
 _BACKGROUND_TASKS: Set[asyncio.Task] = set()
-
 
 rand = random.SystemRandom()
 
@@ -39,7 +39,7 @@ def iscoro(func):
     return asyncio.iscoroutinefunction(func)
 
 
-def get_local_address() -> str:
+def get_local_address():
     """
     Grabs the local IP address using a socket.
 
@@ -47,10 +47,20 @@ def get_local_address() -> str:
     :rtype: str
     """
     # TODO: try not to talk 8888 for this
+    addr = ""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect(("8.8.8.8", 80))
+        #s.connect(("8.8.8.8", 80))
+        #addr = s.getsockname()[0]
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.connect(('10.255.255.255', 80))
         addr = s.getsockname()[0]
+        logger.debug(f"Using IP Address for Homekit Server : {addr}.  To manually change see advanced options in Plugin config")
+    except:
+        logger.error(f"Error Getting local address IP address.  See debug log for more details.")
+        logger.error(f"This is a breaking issue which until fixed will cause no connection to be possible.")
+        logger.debug(f"Exception trying to get local IP address", exc_info=True)
+        logger.error(f"Try setting Interface for HAP in advanced options, Home Server Options:Interface setting")
     finally:
         s.close()
     return str(addr)
@@ -145,15 +155,13 @@ async def event_wait(event, timeout):
         pass
     return event.is_set()
 
-
 @functools.lru_cache(maxsize=2048)
-def uuid_to_hap_type(uuid: UUID) -> str:
+def uuid_to_hap_type(uuid):
     """Convert a UUID to a HAP type."""
     long_type = str(uuid).upper()
     if not long_type.endswith(BASE_UUID):
         return long_type
     return long_type.split("-", 1)[0].lstrip("0")
-
 
 @functools.lru_cache(maxsize=2048)
 def hap_type_to_uuid(hap_type):
@@ -162,23 +170,19 @@ def hap_type_to_uuid(hap_type):
         return UUID(hap_type)
     return UUID("0" * (8 - len(hap_type)) + hap_type + BASE_UUID)
 
-
+## Use ujson x4 times as fast, not as good as orjson, but is installed by default in Indigo 2022.2 as Sanic/Webserver needs
+## Issue is orjson dumps = bytes output, json and ujson = string output hence need for encoding here.
 def to_hap_json(dump_obj):
     """Convert an object to HAP json."""
-    return orjson.dumps(dump_obj)  # pylint: disable=no-member
-
+    return ujson.dumps(dump_obj, separators=(",", ":")).encode("utf-8")  # pylint: disable=no-member
 
 def to_sorted_hap_json(dump_obj):
     """Convert an object to sorted HAP json."""
-    return orjson.dumps(  # pylint: disable=no-member
-        dump_obj, option=orjson.OPT_SORT_KEYS  # pylint: disable=no-member
-    )
-
+    return ujson.dumps(dump_obj, sort_keys=True,separators=(",", ":")).encode("utf-8")
 
 def from_hap_json(json_str):
     """Convert json to an object."""
-    return orjson.loads(json_str)  # pylint: disable=no-member
-
+    return ujson.loads(json_str)  # pylint: disable=no-member
 
 def async_create_background_task(func: Awaitable) -> asyncio.Task:
     """Create a background task and add it to the set of background tasks."""
